@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+const (
+	maxPending = 20
+)
+
 type Item struct {
 	ID string `json:"id"`
 }
@@ -66,7 +70,14 @@ func (h *Handler) IOLoop(done <-chan struct{}) {
 		if now := time.Now(); next.After(now) { // next 还没到，需要延迟
 			fetchDelay = next.Sub(now)
 		}
-		startFetch := time.After(fetchDelay)
+
+		// fix: 限制 pending 无限膨胀
+		// 方法1，进一步修改 fetch 开始时机，不仅要有 delay 限制，同时还要检查 pending 限制
+		// 方法2，丢弃 pending 最早的 item，满足 maxPending 限制
+		var startFetch <-chan time.Time
+		if len(pending) > maxPending {
+			startFetch = time.After(fetchDelay)
+		}
 
 		var firstItem Item
 		var updates chan Item
