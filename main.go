@@ -54,6 +54,12 @@ func (h *Handler) GetUpdates() chan Item {
 	return h.updates
 }
 
+type fetchResult struct {
+	fetched []Item
+	next    time.Time
+	err     error
+}
+
 func (h *Handler) IOLoop(done <-chan struct{}) {
 	var (
 		err     error
@@ -62,6 +68,8 @@ func (h *Handler) IOLoop(done <-chan struct{}) {
 
 		// 给 Fetch 去重 (deduplicat)
 		seen = make(map[string]bool)
+		// if non-nil, Fetch is running
+		fetchDone chan fetchResult
 	)
 
 	for {
@@ -72,10 +80,10 @@ func (h *Handler) IOLoop(done <-chan struct{}) {
 		}
 
 		// fix: 限制 pending 无限膨胀
-		// 方法1，进一步修改 fetch 开始时机，不仅要有 delay 限制，同时还要检查 pending 限制
+		// 方法1，进一步修改 fetch 开始时机，不仅要有 delay 限制，还要检查 pending 限制，同时还要检查异步 Fetch 执行状态
 		// 方法2，丢弃 pending 最早的 item，满足 maxPending 限制
 		var startFetch <-chan time.Time
-		if len(pending) > maxPending {
+		if fetchDone == nil && len(pending) > maxPending {
 			startFetch = time.After(fetchDelay)
 		}
 
@@ -86,6 +94,8 @@ func (h *Handler) IOLoop(done <-chan struct{}) {
 			updates = h.updates
 		}
 
+		// 所有的修改和优化都朝着同一个方向：尽量减少每一个 case 的时间占用，
+		// 让一个 goroutine 就可以将 for loop 高效 run 起来
 		select {
 		case errCh := <-h.closing:
 			errCh <- err
@@ -93,10 +103,17 @@ func (h *Handler) IOLoop(done <-chan struct{}) {
 			return
 		case <-startFetch:
 			// 是时候开始下一次 fetch 了
+			fetchDone = make(chan fetchResult, 1)
+			go func() {
+				fetched, next, err := Fetch("")
+				fetchDone <- fetchResult{fetched, next, err}
+			}()
+		case result := <-fetchDone:
+			fetchDone = nil // 此次 Fetch 执行完毕，可以开始下一次
 			var fetched []Item
-			fetched, next, err = Fetch("")
+			fetched, next, err = result.fetched, result.next, result.err
 			if err != nil {
-				// 出错需要延迟 10s 再试
+				// 出错需要延迟 5s 再试
 				next = time.Now().Add(5 * time.Second)
 				log.Printf("fetching fail: %v", err)
 				break // 跳出 select, 继续 for
